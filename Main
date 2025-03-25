@@ -1,0 +1,153 @@
+import discord
+from discord.ext import commands, tasks
+import asyncio
+from collections import defaultdict
+
+# Bot setup
+intents = discord.Intents.default()
+intents.message_content = True
+intents.messages = True
+intents.guilds = True
+intents.members = True
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Tracking points per server
+order_points = defaultdict(lambda: defaultdict(int))  # Now tracks per server
+winner_channel_ids = {}  # Store winner channel IDs per server
+leaderboard_channel_ids = {}  # Store leaderboard channel IDs per server
+image_channel_ids = {}  # Store image channel IDs per server
+leaderboard_message_ids = {}  # Store leaderboard message IDs per server
+
+
+# Command to set up channels per server
+@bot.command()
+async def setchannels(ctx,
+                      winner: discord.TextChannel = None,
+                      leaderboard: discord.TextChannel = None,
+                      image: discord.TextChannel = None):
+    if not winner or not leaderboard or not image:
+        await ctx.send(
+            "⚠️ Please mention all three channels: !setchannels #winner #leaderboard #image"
+        )
+        return
+
+    try:
+        winner_channel_ids[ctx.guild.id] = winner.id
+        leaderboard_channel_ids[ctx.guild.id] = leaderboard.id
+        image_channel_ids[ctx.guild.id] = image.id
+        await ctx.send(
+            f"✅ Channels have been set up successfully!\n🏆 Winner Channel: {winner.mention}\n📊 Leaderboard Channel: {leaderboard.mention}\n📷 Image Vouch Channel: {image.mention}"
+        )
+    except Exception as e:
+        await ctx.send(f"❌ An error occurred: {e}")
+
+
+# Command to add points
+@bot.command()
+async def addpoint(ctx, member: discord.Member):
+    order_points[ctx.guild.id][member.id] += 1
+    await ctx.send(
+        f"{member.mention} has received a point! Total: {order_points[ctx.guild.id][member.id]}"
+    )
+
+
+# Command to remove points
+@bot.command()
+async def removepoint(ctx, member: discord.Member):
+    if order_points[ctx.guild.id][member.id] > 0:
+        order_points[ctx.guild.id][member.id] -= 1
+        await ctx.send(
+            f"{member.mention} has lost a point. Total: {order_points[ctx.guild.id][member.id]}"
+        )
+    else:
+        await ctx.send(f"{member.mention} has no points to remove.")
+
+
+# Command to check leaderboard manually
+@bot.command()
+async def leaderboard(ctx):
+    await update_leaderboard(ctx.guild.id)
+
+
+# Auto-updating leaderboard
+@tasks.loop(minutes=5)
+async def update_leaderboard(guild_id=None):
+    if guild_id:
+        guild_ids = [guild_id]
+    else:
+        guild_ids = leaderboard_channel_ids.keys()
+
+    for gid in guild_ids:
+        channel = bot.get_channel(leaderboard_channel_ids.get(gid, 0))
+        if not channel:
+            continue
+
+        if not order_points[gid]:
+            leaderboard_text = "No orders have been recorded this week."
+        else:
+            sorted_leaderboard = sorted(order_points[gid].items(),
+                                        key=lambda x: x[1],
+                                        reverse=True)
+            leaderboard_text = "\n".join([
+                f"<@{user}>: {points} orders"
+                for user, points in sorted_leaderboard
+            ])
+
+        if gid in leaderboard_message_ids:
+            try:
+                msg = await channel.fetch_message(leaderboard_message_ids[gid])
+                await msg.edit(
+                    content=f"**Weekly Leaderboard:**\n{leaderboard_text}")
+            except discord.NotFound:
+                leaderboard_message_ids[gid] = None
+
+        if gid not in leaderboard_message_ids or leaderboard_message_ids[
+                gid] is None:
+            msg = await channel.send(
+                f"**Weekly Leaderboard:**\n{leaderboard_text}")
+            leaderboard_message_ids[gid] = msg.id
+
+
+# Weekly winner announcement
+@tasks.loop(hours=168)
+async def announce_winner():
+    for gid in winner_channel_ids.keys():
+        if not order_points[gid]:
+            continue
+
+        winner_id = max(order_points[gid], key=order_points[gid].get)
+        winner_points = order_points[gid][winner_id]
+        channel = bot.get_channel(winner_channel_ids[gid])
+
+        if channel:
+            await channel.send(
+                f"🏆 **Weekly Winner:** <@{winner_id}> with {winner_points} orders! Congrats!"
+            )
+
+        order_points[gid].clear()
+        await update_leaderboard(gid)
+
+
+# Automatically give a point when a user sends an image
+@bot.event
+async def on_message(message):
+    guild_id = message.guild.id
+    if guild_id in image_channel_ids and message.channel.id == image_channel_ids[
+            guild_id] and message.attachments:
+        order_points[guild_id][message.author.id] += 1
+        await message.channel.send(
+            f"{message.author.mention} has received a point for submitting a vouch! Total: {order_points[guild_id][message.author.id]}"
+        )
+
+    await bot.process_commands(message)
+
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+    announce_winner.start()
+    update_leaderboard.start()
+
+
+bot.run(
+    "MTM1NDE1NzkyNzMyOTQzMTYyNA.Gx9qSu.HfYQ5dlcc0sNXAiKGCaJa7wuxtl2DZZvF8f8qo")
